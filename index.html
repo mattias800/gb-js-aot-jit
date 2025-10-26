@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Game Boy Recompiler Emulator</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #fff;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    
+    .container {
+      text-align: center;
+    }
+    
+    h1 {
+      margin-bottom: 20px;
+      font-size: 24px;
+      color: #4CAF50;
+    }
+    
+    .screen-container {
+      display: inline-block;
+      border: 8px solid #2a2a2a;
+      border-radius: 4px;
+      background: #0f380f;
+      padding: 20px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    
+    canvas {
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      width: 640px;
+      height: 576px;
+      border: 2px solid #000;
+    }
+    
+    .controls {
+      margin-top: 20px;
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    
+    button {
+      background: #4CAF50;
+      border: none;
+      color: white;
+      padding: 12px 24px;
+      font-size: 14px;
+      font-family: 'Courier New', monospace;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+    
+    button:hover {
+      background: #45a049;
+    }
+    
+    button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+    
+    .stats {
+      margin-top: 20px;
+      text-align: left;
+      background: #2a2a2a;
+      padding: 15px;
+      border-radius: 4px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    
+    .stats-line {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 5px;
+    }
+    
+    .stats-label {
+      color: #888;
+    }
+    
+    .stats-value {
+      color: #4CAF50;
+      font-weight: bold;
+    }
+    
+    .file-input {
+      display: none;
+    }
+    
+    .file-label {
+      background: #2196F3;
+      display: inline-block;
+      padding: 12px 24px;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+    
+    .file-label:hover {
+      background: #1976D2;
+    }
+    
+    .status {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    
+    .status.info {
+      background: #1976D2;
+    }
+    
+    .status.success {
+      background: #4CAF50;
+    }
+    
+    .status.error {
+      background: #f44336;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎮 Game Boy Dynamic Recompiler</h1>
+    
+    <div class="screen-container">
+      <canvas id="screen" width="160" height="144"></canvas>
+    </div>
+    
+    <div class="controls">
+      <label for="romFile" class="file-label">Load ROM</label>
+      <input type="file" id="romFile" class="file-input" accept=".gb">
+      <button id="startBtn" disabled>Start</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="resetBtn" disabled>Reset</button>
+    </div>
+    
+    <div id="status" class="status info">Load a ROM file to begin</div>
+    
+    <div class="stats">
+      <div class="stats-line">
+        <span class="stats-label">FPS:</span>
+        <span class="stats-value" id="fps">0</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">Total Cycles:</span>
+        <span class="stats-value" id="cycles">0</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">Blocks Compiled:</span>
+        <span class="stats-value" id="blocks">0</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">Cache Hit Rate:</span>
+        <span class="stats-value" id="hitRate">0%</span>
+      </div>
+      <div class="stats-line">
+        <span class="stats-label">PC:</span>
+        <span class="stats-value" id="pc">0x0000</span>
+      </div>
+    </div>
+  </div>
+  
+  <script type="module">
+    import { loadROMFromArrayBuffer } from '/src/loader/ROMLoader.ts';
+    import { RecompilerEngine } from '/src/runtime/RecompilerEngine.ts';
+    
+    const canvas = document.getElementById('screen');
+    const ctx = canvas.getContext('2d');
+    const romFileInput = document.getElementById('romFile');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const statusDiv = document.getElementById('status');
+    
+    let engine = null;
+    let running = false;
+    let frameCount = 0;
+    let lastFpsTime = Date.now();
+    
+    // Stats elements
+    const fpsEl = document.getElementById('fps');
+    const cyclesEl = document.getElementById('cycles');
+    const blocksEl = document.getElementById('blocks');
+    const hitRateEl = document.getElementById('hitRate');
+    const pcEl = document.getElementById('pc');
+    
+    function setStatus(message, type = 'info') {
+      statusDiv.textContent = message;
+      statusDiv.className = `status ${type}`;
+    }
+    
+    function updateStats() {
+      if (!engine) return;
+      
+      const stats = engine.getStats();
+      const state = engine.getState();
+      
+      cyclesEl.textContent = stats.totalCycles.toLocaleString();
+      blocksEl.textContent = stats.blocksCompiled.toLocaleString();
+      
+      const hitRate = ((stats.cacheHits / (stats.cacheHits + stats.cacheMisses)) * 100).toFixed(2);
+      hitRateEl.textContent = `${hitRate}%`;
+      
+      pcEl.textContent = `0x${state.PC.toString(16).padStart(4, '0').toUpperCase()}`;
+    }
+    
+    function renderFrame() {
+      if (!engine) return;
+      
+      const ppu = engine.getPPU();
+      const frameBuffer = ppu.getFrameBuffer();
+      
+      // Create ImageData from frame buffer
+      const imageData = new ImageData(frameBuffer, 160, 144);
+      ctx.putImageData(imageData, 0, 0);
+      
+      frameCount++;
+      
+      // Update FPS counter
+      const now = Date.now();
+      if (now - lastFpsTime >= 1000) {
+        fpsEl.textContent = frameCount;
+        frameCount = 0;
+        lastFpsTime = now;
+      }
+      
+      updateStats();
+    }
+    
+    function mainLoop() {
+      if (!running || !engine) return;
+      
+      try {
+        // Execute one frame
+        engine.executeFrame();
+        renderFrame();
+        
+        // Continue loop
+        requestAnimationFrame(mainLoop);
+      } catch (error) {
+        console.error('Execution error:', error);
+        setStatus(`Error: ${error.message}`, 'error');
+        running = false;
+        stopBtn.disabled = true;
+        startBtn.disabled = false;
+      }
+    }
+    
+    romFileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      try {
+        setStatus('Loading ROM...', 'info');
+        
+        const arrayBuffer = await file.arrayBuffer();
+        
+        // Use browser-compatible ROM loader
+        const rom = loadROMFromArrayBuffer(arrayBuffer);
+        
+        setStatus('Analyzing and compiling...', 'info');
+        
+        // Small delay to show message
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        engine = new RecompilerEngine(rom);
+        
+        setStatus(`Loaded: ${rom.title}`, 'success');
+        startBtn.disabled = false;
+        resetBtn.disabled = false;
+        
+        // Render initial frame
+        renderFrame();
+      } catch (error) {
+        console.error('Failed to load ROM:', error);
+        setStatus(`Failed to load ROM: ${error.message}`, 'error');
+      }
+    });
+    
+    startBtn.addEventListener('click', () => {
+      if (!engine) return;
+      
+      running = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      setStatus('Running...', 'success');
+      
+      mainLoop();
+    });
+    
+    stopBtn.addEventListener('click', () => {
+      running = false;
+      stopBtn.disabled = true;
+      startBtn.disabled = false;
+      setStatus('Stopped', 'info');
+    });
+    
+    resetBtn.addEventListener('click', () => {
+      if (!engine) return;
+      
+      running = false;
+      engine.reset();
+      
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setStatus('Reset complete', 'info');
+      
+      // Clear screen
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, 160, 144);
+      
+      updateStats();
+    });
+  </script>
+</body>
+</html>
