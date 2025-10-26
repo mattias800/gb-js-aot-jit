@@ -13,6 +13,17 @@ import { RegisterAnalyzer } from '../analyzer/RegisterAnalyzer';
 import { ConstantAnalyzer } from '../analyzer/ConstantAnalyzer';
 import { EMBEDDED_JIT_CODE } from './EmbeddedJIT';
 
+// Try to load BIOS if available
+let bios: Uint8Array | null = null;
+try {
+  const biosModule = require('../bios.ts');
+  bios = biosModule.bios;
+  console.log('✓ BIOS loaded - Nintendo logo animation will be shown');
+} catch (e: any) {
+  console.log('ℹ BIOS not found - starting directly at 0x0100');
+  // Uncomment for debugging: console.log('BIOS load error:', e.message);
+}
+
 export interface AOTCompilerOptions {
   romTitle: string;
   outputPath: string;
@@ -98,6 +109,9 @@ export class AOTCompiler {
    */
   private generateStandaloneFile(options: AOTCompilerOptions, compiledBlocks: string[]): string {
     const romDataArray = Array.from(this.rom.data).join(',');
+    const hasBios = bios !== null;
+    const biosDataArray = hasBios ? Array.from(bios).join(',') : '';
+    const startPC = hasBios ? '0x0000' : '0x0100';
     
     return `/**
  * ${options.romTitle} - AOT Compiled Game Boy ROM
@@ -129,7 +143,7 @@ export class AOTCompiler {
       this.L = 0x4D;
       this.F = 0xB0;
       this.SP = 0xFFFE;
-      this.PC = 0x0100;
+      this.PC = ${startPC};
       this.cycles = 0;
       this.halted = false;
       this.IME = false;
@@ -148,7 +162,7 @@ export class AOTCompiler {
     reset() {
       this.A = 0x01; this.B = 0x00; this.C = 0x13; this.D = 0x00;
       this.E = 0xD8; this.H = 0x01; this.L = 0x4D; this.F = 0xB0;
-      this.SP = 0xFFFE; this.PC = 0x0100;
+      this.SP = 0xFFFE; this.PC = ${startPC};
       this.cycles = 0; this.halted = false; this.IME = false;
       this.enableIMEAfterNext = false;
     }
@@ -157,8 +171,10 @@ export class AOTCompiler {
   // ===== Memory Management Unit =====
   
   class MMU {
-    constructor(romData) {
+    constructor(romData, biosData) {
       this.rom = new Uint8Array(romData);
+      this.bios = biosData ? new Uint8Array(biosData) : null;
+      this.biosEnabled = !!biosData;  // BIOS is mapped only if provided
       this.vram = new Uint8Array(0x2000);
       this.wram = new Uint8Array(0x2000);
       this.oam = new Uint8Array(0xA0);
@@ -167,6 +183,8 @@ export class AOTCompiler {
     }
     
     read8(addr) {
+      // BIOS is mapped at 0x00-0xFF until disabled
+      if (addr < 0x0100 && this.biosEnabled && this.bios) return this.bios[addr];
       if (addr < 0x8000) return this.rom[addr];
       if (addr < 0xA000) return this.vram[addr - 0x8000];
       if (addr < 0xC000) return 0xFF;
@@ -189,6 +207,11 @@ export class AOTCompiler {
       if (addr < 0xFEA0) { this.oam[addr - 0xFE00] = value; return; }
       if (addr < 0xFF00) return;
       if (addr < 0xFF80) {
+        // Writing to 0xFF50 unmaps the BIOS
+        if (addr === 0xFF50 && value !== 0) {
+          this.biosEnabled = false;
+          console.log('[BIOS] Unmapped - jumping to cartridge at 0x0100');
+        }
         // Log LCDC writes
         if (addr === 0xFF40) {
           const oldValue = this.io[0x40] || 0;
@@ -529,6 +552,7 @@ ${EMBEDDED_JIT_CODE}
   // ===== ROM Data =====
   
   const romData = new Uint8Array([${romDataArray}]);
+  ${hasBios ? `const biosData = new Uint8Array([${biosDataArray}]);` : 'const biosData = null;'}
   
   // ===== Compiled Blocks =====
   
@@ -541,7 +565,7 @@ ${compiledBlocks.join('\n')}
   class Emulator {
     constructor() {
       this.state = new CPUState();
-      this.mmu = new MMU(romData);
+      this.mmu = new MMU(romData, biosData);
       this.ppu = new PPU(this.mmu);
       this.running = false;
     }
